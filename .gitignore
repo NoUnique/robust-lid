@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+_temp/
+test_lid.py
