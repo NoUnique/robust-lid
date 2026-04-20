@@ -1,8 +1,22 @@
 # robust-lid
 
+[![PyPI](https://img.shields.io/pypi/v/robust-lid.svg)](https://pypi.org/project/robust-lid/)
+[![Python](https://img.shields.io/pypi/pyversions/robust-lid.svg)](https://pypi.org/project/robust-lid/)
+[![CI](https://github.com/NoUnique/robust-lid/actions/workflows/ci.yml/badge.svg)](https://github.com/NoUnique/robust-lid/actions/workflows/ci.yml)
+[![Release](https://github.com/NoUnique/robust-lid/actions/workflows/release.yml/badge.svg)](https://github.com/NoUnique/robust-lid/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Robust language identification that ensembles multiple LID backends into a single
 `(language_script, confidence)` prediction. Designed for short/noisy text where
 any single classifier is unreliable.
+
+## Install
+
+```bash
+pip install robust-lid                 # core ensemble (5 backends)
+pip install 'robust-lid[cld3]'         # +CLD3 (requires system protoc)
+pip install 'robust-lid[dev]'          # +dev tooling (ruff, mypy, pytest, …)
+```
 
 ## Quick start
 
@@ -331,3 +345,34 @@ To measure per-backend accuracy on your own data and re-tune:
 ```bash
 uv run python scripts/per_backend_accuracy.py --lang por deu tur --n 50
 ```
+
+## Release process
+
+Releases are fully automated via `python-semantic-release` + PyPI Trusted
+Publishing. Every merge to `main` runs the [release
+workflow](.github/workflows/release.yml), which:
+
+1. Parses [Conventional Commits](https://www.conventionalcommits.org/) since
+   the last tag.
+2. Decides the next semver (`fix:`/`perf:` → patch, `feat:` → minor,
+   `BREAKING CHANGE` or `type!:` → major).
+3. Updates `pyproject.toml`'s `project.version`, appends to `CHANGELOG.md`,
+   tags `vX.Y.Z`, and pushes a release commit.
+4. Builds with `uv build` and uploads the wheel + sdist to PyPI via OIDC
+   (no token secret — configured once as a PyPI trusted publisher).
+5. Attaches the artifacts to the GitHub Release.
+
+If no commit since the last release qualifies for a bump (only
+`chore`/`docs`/etc.), the workflow is a no-op.
+
+### Commit prefix cheat sheet
+
+| Prefix | Version bump | Example |
+|---|---|---|
+| `feat:` | minor | `feat: add predict_batch` |
+| `fix:` / `perf:` | patch | `fix: handle empty input` |
+| `feat!:` / `fix!:` / `BREAKING CHANGE:` footer | major (once we're on 1.x) | `feat!: drop Python 3.11 support` |
+| `chore:` / `docs:` / `style:` / `refactor:` / `test:` / `build:` / `ci:` | — | `docs: add FAQ` |
+
+While `major_on_zero = false` (0.x lifecycle), breaking changes still bump
+**minor** rather than promoting to 1.0.

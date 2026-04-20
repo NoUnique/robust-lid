@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify before release (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Don't re-run on the release bot's own commit.
+    if: ${{ !contains(github.event.head_commit.message, 'chore(release):') }}
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install system deps (protoc for gcld3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev
+
+      - name: Install project
+        run: uv sync --extra dev --extra cld3
+
+      - name: Ruff lint
+        run: uv run ruff check src/ tests/ scripts/
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/ scripts/
+
+      - name: Mypy
+        run: uv run mypy src/robust_lid
+
+      - name: Pytest (fast suite)
+        run: uv run pytest -m "not slow and not network"
+
+  release:
+    name: Semantic release + PyPI publish
+    needs: verify
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, 'chore(release):') }}
+    environment:
+      name: release
+      url: https://pypi.org/p/robust-lid
+    permissions:
+      id-token: write    # OIDC for PyPI Trusted Publishing
+      contents: write    # push tag + release commit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Python Semantic Release
+        id: release
+        uses: python-semantic-release/python-semantic-release@v9
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI
+        if: steps.release.outputs.released == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No user/password — OIDC Trusted Publishing (see README).
+
+      - name: Attach artifacts to GitHub Release
+        if: steps.release.outputs.released == 'true'
+        uses: python-semantic-release/publish-action@v9
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ steps.release.outputs.tag }}

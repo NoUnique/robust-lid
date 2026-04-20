@@ -1,18 +1,56 @@
 [project]
 name = "robust-lid"
 version = "0.1.0"
-description = "Robust Language Identification using Ensemble of Models"
+description = "Robust Language Identification using an ensemble of 5-7 LID backends"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "NoUnique" }]
+keywords = [
+    "language-identification",
+    "lid",
+    "nlp",
+    "fasttext",
+    "glotlid",
+    "cld2",
+    "cld3",
+    "langid",
+    "langdetect",
+    "ensemble",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 dependencies = [
     "fasttext-wheel>=0.9.2",
     "langid>=1.1.6",
     "langdetect>=1.0.9",
     "pycld2>=0.41",
-    # "gcld3>=3.0.13", # Removed due to build failure (missing protoc)
+    # "gcld3>=3.0.13", # optional — install via robust-lid[cld3] (needs system protoc)
     "pycountry>=24.6.1",
     "requests>=2.31.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/NoUnique/robust-lid"
+Repository = "https://github.com/NoUnique/robust-lid"
+Issues = "https://github.com/NoUnique/robust-lid/issues"
+Changelog = "https://github.com/NoUnique/robust-lid/blob/main/CHANGELOG.md"
 
 [project.scripts]
 rlid = "robust_lid.cli:main"
@@ -26,6 +64,8 @@ dev = [
     "mypy>=1.0",
     "pre-commit>=3.0",
     "types-requests>=2.31.0",
+    "python-semantic-release>=9.0",
+    "twine>=5.0",
 ]
 cld3 = [
     "gcld3>=3.0.13",  # requires system protoc; see README
@@ -69,7 +109,7 @@ exclude_lines = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
@@ -79,7 +119,7 @@ ignore = ["E501"]
 quote-style = "double"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -102,3 +142,44 @@ module = [
     "pycountry",
 ]
 ignore_missing_imports = true
+
+# -----------------------------------------------------------------------------
+# python-semantic-release — commits drive version bumps.
+#
+# On each push to main the release workflow runs `semantic-release version`:
+# if there is any commit since the last tag whose type is in `minor_tags`
+# or `patch_tags` (or that declares a breaking change), the version in
+# `pyproject.toml`'s `project.version` is bumped, a new `vX.Y.Z` tag is
+# pushed, and CHANGELOG.md is regenerated. PyPI upload happens in a
+# separate workflow step via OIDC Trusted Publishing (no token in CI).
+#
+# `major_on_zero = false` keeps us on 0.x — a breaking change on 0.x bumps
+# minor instead of promoting to 1.0 prematurely. Flip when the API stabilises.
+# -----------------------------------------------------------------------------
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+tag_format = "v{version}"
+commit_message = "chore(release): v{version} [skip ci]"
+build_command = "uv build"
+changelog_file = "CHANGELOG.md"
+upload_to_vcs_release = true
+# Stay on 0.x until API stabilises: disallow promotion to 1.0 on breaking
+# changes, keep bumping minor/patch within 0.x.
+major_on_zero = false
+allow_zero_version = true
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = [
+    "feat", "fix", "perf",
+    "refactor", "docs", "style", "test",
+    "build", "ci", "chore",
+]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+
+[tool.semantic_release.changelog]
+exclude_commit_patterns = [
+    "^chore\\(release\\):",
+    "^Merge ",
+]
