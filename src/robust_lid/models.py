@@ -1,8 +1,10 @@
 import contextlib
 import logging
+import os
+import sys
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -72,6 +74,41 @@ def _patch_fasttext_for_numpy2() -> None:
 
 
 _patch_fasttext_for_numpy2()
+
+
+FASTTEXT_VERBOSE_ENV = "ROBUST_LID_FASTTEXT_VERBOSE"
+
+
+@contextlib.contextmanager
+def _suppress_native_stderr() -> Iterator[None]:
+    """Redirect OS fd 2 (stderr) to ``/dev/null`` for the duration.
+
+    Python's ``contextlib.redirect_stderr`` only rewires ``sys.stderr`` at the
+    Python level — it can't swallow writes emitted by C/C++ code (fasttext's
+    load-time warning goes straight through the fd via libstdc++ iostream).
+    This suppressor works at the OS level, so the native prints disappear.
+    """
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        os.dup2(saved_fd, 2)
+        os.close(devnull_fd)
+        os.close(saved_fd)
+
+
+def _quiet_fasttext_load(path: str) -> Any:
+    """Default fastText model loader that suppresses the C++ load-time
+    warning unless ``ROBUST_LID_FASTTEXT_VERBOSE=1`` is set. The CLI's
+    ``--verbose`` flag flips this env var."""
+    if os.environ.get(FASTTEXT_VERBOSE_ENV) == "1":
+        return fasttext.load_model(path)
+    with _suppress_native_stderr():
+        return fasttext.load_model(path)
+
 
 CLD3_UNAVAILABLE_MSG = (
     "gcld3 is not installed; the CLD3 backend will be excluded from the "
@@ -391,7 +428,7 @@ class FastTextLID(LID):
     ) -> None:
         cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
         download = download_fn if download_fn is not None else _default_download
-        loader = model_loader if model_loader is not None else fasttext.load_model
+        loader = model_loader if model_loader is not None else _quiet_fasttext_load
 
         self.model_path = cache_dir / model_filename
         download(model_url, self.model_path)

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, TextIO
 
@@ -33,6 +35,7 @@ from .ensemble import (
 from .models import (
     CLD2LID,
     CLD3LID,
+    FASTTEXT_VERBOSE_ENV,
     FastText176LID,
     FastText218eLID,
     GlotLID,
@@ -106,8 +109,23 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print backend inventory (supported languages / scripts) and exit.",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "Print per-stage progress to stderr and surface backend warnings "
+            "(e.g. fastText's C++ load-time notice that is hidden by default)."
+        ),
+    )
     parser.add_argument("--version", action="version", version="robust-lid 0.1.0")
     return parser
+
+
+def _vprint(msg: str, verbose: bool) -> None:
+    """Emit a stage message to stderr when --verbose is set."""
+    if verbose:
+        print(f"[rlid] {msg}", file=sys.stderr, flush=True)
 
 
 def _iter_inputs(args: argparse.Namespace) -> Iterator[str]:
@@ -194,7 +212,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.verbose:
+        # Re-enable fastText's native load-time warning so users can debug.
+        os.environ[FASTTEXT_VERBOSE_ENV] = "1"
+
     if args.list_backends:
+        _vprint("listing backends", args.verbose)
         _print_backend_inventory()
         return 0
 
@@ -203,13 +226,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 2
 
+    _vprint("building ensemble (downloads ~1.5 GB on first run)", args.verbose)
+    t0 = time.monotonic()
     engine = _build_engine(args)
+    _vprint(f"ensemble ready in {time.monotonic() - t0:.1f}s", args.verbose)
+
+    count = 0
+    _vprint("predicting", args.verbose)
+    t1 = time.monotonic()
     for text in _iter_inputs(args):
         lang, confidence = engine.predict(text)
+        count += 1
         if args.json:
             print(_format_json(text, lang, confidence))
         else:
             print(_format_plain(text, lang, confidence, show_text=not args.no_text))
+    _vprint(f"done — {count} text(s) in {time.monotonic() - t1:.2f}s", args.verbose)
     return 0
 
 

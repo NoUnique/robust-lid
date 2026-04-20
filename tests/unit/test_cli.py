@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,52 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "robust-lid" in out
+
+
+@pytest.mark.unit
+def test_verbose_sets_fasttext_env_var(
+    fake_engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ROBUST_LID_FASTTEXT_VERBOSE", raising=False)
+    cli.main(["--verbose", "Hello"])
+    assert os.environ.get("ROBUST_LID_FASTTEXT_VERBOSE") == "1"
+
+
+@pytest.mark.unit
+def test_verbose_prints_stage_messages_to_stderr(
+    fake_engine: _FakeEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["--verbose", "Hello"])
+    captured = capsys.readouterr()
+    assert "eng_Latn" in captured.out  # main output unchanged
+    assert "[rlid] building ensemble" in captured.err
+    assert "[rlid] predicting" in captured.err
+    assert "[rlid] done" in captured.err
+
+
+@pytest.mark.unit
+def test_non_verbose_is_silent_on_stderr(
+    fake_engine: _FakeEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["Hello"])
+    captured = capsys.readouterr()
+    assert "eng_Latn" in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.unit
+def test_verbose_with_list_backends_logs_and_runs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_factories = {
+        name: (lambda _n=name: FakeLID([(_n, 1.0)])) for name in cli._BACKEND_FACTORIES
+    }
+    monkeypatch.setattr(cli, "_BACKEND_FACTORIES", fake_factories)
+    monkeypatch.setattr(cli, "default_backend_order", lambda: list(fake_factories))
+    cli.main(["--verbose", "--list-backends"])
+    captured = capsys.readouterr()
+    assert "BACKEND" in captured.out
+    assert "[rlid] listing backends" in captured.err
 
 
 @pytest.mark.unit
