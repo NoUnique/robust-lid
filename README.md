@@ -66,16 +66,46 @@ provided (via `--file` or stdin).
    sequential) but more meaningful for the heavier fasttext-218e / GlotLID
    on large batches.
 
-**The unfixable bottleneck**: `langid` and `langdetect` are pure-Python Naive
-Bayes classifiers with no C extension and no batch API — they sit at roughly
-~5.9 ms/text and ~1.8 ms/text regardless of how we call them, because the
-GIL prevents real threading parallelism for their Python work. For
-throughput-critical use where ensemble diversity can be traded for speed,
-drop them explicitly:
+**The unfixable bottleneck** (and what `fast_mode` solves): per-backend wall
+time on N=200 English sentences, grouped by backend family:
+
+| family | backend | implementation | ms/text |
+|---|---|---|---|
+| pure Python | **langid** | Naive Bayes | **~6.0** |
+| pure Python | **langdetect** | Naive Bayes | **~2.2** |
+| CLD | cld2 | C binding | ~0.00 |
+| CLD | cld3 | C++ via gcld3 | ~0.04 |
+| fastText | ft176 | C++ | ~0.01 |
+| fastText | ft218e | C++ | ~0.06 |
+| fastText | glotlid | C++ | ~0.43 |
+
+`langid` and `langdetect` are pure-Python, GIL-bound, and have no batch
+API — they sit at ~95 % of total ensemble wall time regardless of how we
+call them.
+
+### `fast_mode` (default: on)
+
+`RobustLID(fast_mode=True)` — which is the **default** — drops those two
+backends from the ensemble, leaving 4-5 all-C/C++ backends
+(`cld2`, `cld3`, `ft176`, `ft218e`, `glotlid`). This gives a large wall-time
+reduction with a small accuracy cost (fastText-176 alone already covers
+176 languages — most of what langid+langdetect contribute).
+
+```python
+from robust_lid import RobustLID
+RobustLID()                   # fast_mode=True, 5-backend ensemble (default)
+RobustLID(fast_mode=False)    # all 7 backends — maximum ensemble diversity
+```
+
+CLI equivalents:
 
 ```bash
-rlid --models ft176,ft218e,glotlid,cld2,cld3 < input.txt
+rlid "text"                   # fast_mode default
+rlid --with-slow "text"       # include langid + langdetect
 ```
+
+``SLOW_BACKEND_NAMES`` in ``robust_lid.ensemble`` exposes the excluded set
+(``frozenset({"langid", "langdetect"})``) for introspection.
 
 ### Execution modes and memory footprint
 

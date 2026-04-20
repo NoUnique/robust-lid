@@ -227,7 +227,11 @@ def test_default_path_uses_robustlid_no_args(monkeypatch: pytest.MonkeyPatch) ->
     cli.main(["Hello"])  # no --models, no --uniform
     assert captured["called"] is True
     # Default path passes execution-mode kwargs but no weight overrides
-    assert captured["kwargs"] == {"parallel": True, "low_memory": False}
+    assert captured["kwargs"] == {
+        "parallel": True,
+        "low_memory": False,
+        "fast_mode": True,
+    }
 
 
 @pytest.mark.unit
@@ -242,7 +246,7 @@ def test_uniform_builds_all_ones(monkeypatch: pytest.MonkeyPatch) -> None:
             return ("eng_Latn", 1.0)
 
     monkeypatch.setattr(cli, "RobustLID", _Recorder)
-    monkeypatch.setattr(cli, "default_backend_order", lambda: ["a", "b", "c"])
+    monkeypatch.setattr(cli, "default_backend_order", lambda _fm=False: ["a", "b", "c"])
     cli.main(["--uniform", "Hello"])
     assert captured["weights"] == [1.0, 1.0, 1.0]
     assert captured["script_weights"] == [{}, {}, {}]
@@ -294,6 +298,22 @@ def test_low_memory_flag_passes_through(monkeypatch: pytest.MonkeyPatch) -> None
     cli.main(["--low-memory", "Hello"])
     assert captured.get("low_memory") is True
     assert captured.get("parallel") is True  # default
+
+
+@pytest.mark.unit
+def test_with_slow_flag_disables_fast_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def predict(self, _t: str) -> tuple[str, float]:
+            return ("eng_Latn", 1.0)
+
+    monkeypatch.setattr(cli, "RobustLID", _Recorder)
+    cli.main(["--with-slow", "Hello"])
+    assert captured.get("fast_mode") is False
 
 
 @pytest.mark.unit

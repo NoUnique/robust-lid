@@ -70,6 +70,15 @@ DEFAULT_BACKEND_ORDER: tuple[str, ...] = (
     "glotlid",
 )
 
+# Pure-Python, GIL-bound backends that dominate wall time (~6 ms/text and
+# ~2 ms/text respectively on English). They have no native batch API and no
+# C extension, so threading parallelism is limited by the GIL.
+#
+# ``RobustLID(fast_mode=True)`` — the default — excludes them from the
+# ensemble for a ~14× throughput win. They're retained with ``fast_mode=False``
+# when maximum ensemble diversity is preferred over speed.
+SLOW_BACKEND_NAMES: frozenset[str] = frozenset({"langid", "langdetect"})
+
 # Per-backend scalar multiplier. Tuned from WiLi-2018 + papluca overall
 # accuracy across 30 languages (WiLi / papluca):
 #   ft176     98.8 / 99.1
@@ -117,43 +126,64 @@ DEFAULT_LANG_WEIGHTS_BY_NAME: dict[str, dict[str, float]] = {
 }
 
 
-def default_backend_order() -> list[str]:
-    """Names of the models returned by `_default_models()`, in order."""
+def default_backend_order(fast_mode: bool = False) -> list[str]:
+    """Names of the models returned by `_default_models()`, in order.
+
+    ``fast_mode=True`` filters out the pure-Python ``SLOW_BACKEND_NAMES``
+    (langid, langdetect) that otherwise dominate wall time. Default is
+    ``False`` for inspection callers (``--list-backends``, benchmarks) that
+    want to see every available backend.
+    """
     order = ["langid", "langdetect", "cld2"]
     if is_cld3_available():
         order.append("cld3")
     order.extend(["ft176", "ft218e", "glotlid"])
+    if fast_mode:
+        order = [n for n in order if n not in SLOW_BACKEND_NAMES]
     return order
 
 
-def default_weights() -> list[float]:
-    """Per-model scalar defaults aligned to ``default_backend_order()``."""
-    return [DEFAULT_WEIGHTS_BY_NAME.get(name, 1.0) for name in default_backend_order()]
+def default_weights(fast_mode: bool = False) -> list[float]:
+    """Per-model scalar defaults aligned to ``default_backend_order(fast_mode)``."""
+    return [DEFAULT_WEIGHTS_BY_NAME.get(name, 1.0) for name in default_backend_order(fast_mode)]
 
 
-def default_script_weights() -> list[dict[str, float]]:
+def default_script_weights(fast_mode: bool = False) -> list[dict[str, float]]:
     """Per-model script-conditional multiplier tables."""
-    return [dict(DEFAULT_SCRIPT_WEIGHTS_BY_NAME.get(name, {})) for name in default_backend_order()]
+    return [
+        dict(DEFAULT_SCRIPT_WEIGHTS_BY_NAME.get(name, {}))
+        for name in default_backend_order(fast_mode)
+    ]
 
 
-def default_lang_weights() -> list[dict[str, float]]:
+def default_lang_weights(fast_mode: bool = False) -> list[dict[str, float]]:
     """Per-model predicted-language multiplier tables."""
-    return [dict(DEFAULT_LANG_WEIGHTS_BY_NAME.get(name, {})) for name in default_backend_order()]
+    return [
+        dict(DEFAULT_LANG_WEIGHTS_BY_NAME.get(name, {}))
+        for name in default_backend_order(fast_mode)
+    ]
 
 
-def _default_models() -> list[LID]:
-    items: list[LID] = [LangidLID(), LangdetectLID(), CLD2LID()]
+def _default_models(fast_mode: bool = False) -> list[LID]:
+    items: list[LID] = []
+    if not fast_mode:
+        items.extend([LangidLID(), LangdetectLID()])
+    items.append(CLD2LID())
     if is_cld3_available():
         items.append(CLD3LID())
     items.extend([FastText176LID(), FastText218eLID(), GlotLID()])
     return items
 
 
-def _default_factories() -> list[Callable[[], LID]]:
-    """Zero-argument backend constructors, in the same order as ``default_backend_order()``.
-    Used by low-memory mode: each predict call instantiates backends one at a time
-    and releases them afterwards, so peak RAM ≈ size of the largest single model."""
-    items: list[Callable[[], LID]] = [LangidLID, LangdetectLID, CLD2LID]
+def _default_factories(fast_mode: bool = False) -> list[Callable[[], LID]]:
+    """Zero-argument backend constructors, in the same order as
+    ``default_backend_order(fast_mode)``. Used by low-memory mode: each predict
+    call instantiates backends one at a time and releases them afterwards, so
+    peak RAM ≈ size of the largest single model."""
+    items: list[Callable[[], LID]] = []
+    if not fast_mode:
+        items.extend([LangidLID, LangdetectLID])
+    items.append(CLD2LID)
     if is_cld3_available():
         items.append(CLD3LID)
     items.extend([FastText176LID, FastText218eLID, GlotLID])
@@ -172,6 +202,7 @@ class RobustLID:
     lang_weights: list[dict[str, float]] | None
     parallel: bool
     low_memory: bool
+    fast_mode: bool
 
     def __init__(
         self,
@@ -181,25 +212,29 @@ class RobustLID:
         lang_weights: list[dict[str, float]] | None = None,
         parallel: bool = True,
         low_memory: bool = False,
+        fast_mode: bool = True,
     ) -> None:
         """Build a weighted LID ensemble.
 
         Execution modes
         ---------------
-        * Default (``parallel=True``, ``low_memory=False``) — eager-load every
-          backend at construction time, run per-text predict calls concurrently
-          on a thread pool. Fastest; peak RAM ≈ sum of all loaded models
-          (~2 GB with the default 7 backends).
-        * ``low_memory=True`` — do NOT eager-load; each ``predict`` instantiates
-          one backend at a time, collects its vote, and drops the reference
-          before moving on. Peak RAM ≈ size of the largest single model
-          (~1.2 GB). Much slower per call (each predict re-loads fastText
-          models from disk). Incompatible with a custom ``models=`` list and
-          bypasses script gating (which requires live model instances).
+        * ``fast_mode=True`` (default) — drop the two pure-Python backends
+          (``langid``, ``langdetect``) that otherwise dominate wall time via
+          the GIL. The remaining 4-5 backends are all C/C++ bindings. Gives
+          a ~14× speedup on throughput-bound workloads with a small accuracy
+          cost (fastText/GlotLID cover most of langid's language set already).
+        * ``parallel=True`` (default) — eager-load every backend, run
+          per-text predict calls concurrently on a thread pool.
+        * ``low_memory=True`` — do NOT eager-load; each predict loads one
+          backend at a time, collects its vote, and drops the reference.
+          Peak RAM ≈ size of the largest single model (~1.2 GB). Slower per
+          call. Incompatible with a custom ``models=`` list; bypasses script
+          gating (which needs live model instances).
         * ``parallel=False`` — sequential predict calls in a plain Python loop.
 
-        When ``models`` is None the default 6/7-backend ensemble is built and
-        tuned defaults for the three weight parameters are applied.
+        When ``models`` is None the default ensemble is built (5 backends
+        with ``fast_mode=True``, 7 with ``fast_mode=False``) and tuned
+        defaults for the three weight parameters are applied.
         """
         if low_memory and models is not None:
             raise ValueError(
@@ -209,24 +244,25 @@ class RobustLID:
 
         self.parallel = parallel
         self.low_memory = low_memory
+        self.fast_mode = fast_mode
         using_default_models = models is None
 
         if low_memory:
-            self._factories: list[Callable[[], LID]] | None = _default_factories()
+            self._factories: list[Callable[[], LID]] | None = _default_factories(fast_mode)
             self.models = []
             effective_n = len(self._factories)
         else:
             self._factories = None
-            self.models = models if models is not None else _default_models()
+            self.models = models if models is not None else _default_models(fast_mode)
             effective_n = len(self.models)
 
         if using_default_models:
             if weights is None:
-                weights = default_weights()
+                weights = default_weights(fast_mode)
             if script_weights is None:
-                script_weights = default_script_weights()
+                script_weights = default_script_weights(fast_mode)
             if lang_weights is None:
-                lang_weights = default_lang_weights()
+                lang_weights = default_lang_weights(fast_mode)
 
         for name, value in (
             ("weights", weights),

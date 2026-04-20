@@ -276,7 +276,7 @@ def test_robustlid_predict_batch_low_memory_streams() -> None:
     factories = [make_factory(n) for n in ("eng", "kor", "jpn")]
     ens_module = ens
     orig_factories_fn = ens_module._default_factories
-    ens_module._default_factories = lambda: factories  # type: ignore[assignment]
+    ens_module._default_factories = lambda _fm=False: factories  # type: ignore[assignment]
 
     try:
         lid = RobustLID(

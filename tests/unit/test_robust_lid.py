@@ -63,8 +63,10 @@ def test_default_models_includes_cld3_when_available(monkeypatch: pytest.MonkeyP
         monkeypatch.setattr(ens, name, lambda *_a, **_kw: FakeLID([]))
     monkeypatch.setattr(ens, "is_cld3_available", lambda: True)
 
-    default_ensemble = RobustLID()
-    assert len(default_ensemble.models) == 7
+    # fast_mode=False surfaces all 7 backends
+    assert len(RobustLID(fast_mode=False).models) == 7
+    # fast_mode=True (default) drops the 2 pure-Python backends
+    assert len(RobustLID().models) == 5
 
 
 @pytest.mark.unit
@@ -83,8 +85,10 @@ def test_default_models_excludes_cld3_when_unavailable(monkeypatch: pytest.Monke
         monkeypatch.setattr(ens, name, lambda *_a, **_kw: FakeLID([]))
     monkeypatch.setattr(ens, "is_cld3_available", lambda: False)
 
-    default_ensemble = RobustLID()
-    assert len(default_ensemble.models) == 6
+    # fast_mode=False: 7-cld3 = 6 backends
+    assert len(RobustLID(fast_mode=False).models) == 6
+    # fast_mode=True (default): 6 - 2 slow = 4 backends
+    assert len(RobustLID().models) == 4
 
 
 @pytest.mark.unit
@@ -175,7 +179,7 @@ def test_lang_weight_downweights_specific_prediction() -> None:
 
 @pytest.mark.unit
 def test_defaults_auto_applied_when_models_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RobustLID() without args applies all three default tables."""
+    """RobustLID() without args applies all three default tables (fast_mode=True)."""
     from robust_lid import ensemble as ens
 
     for name in [
@@ -191,9 +195,9 @@ def test_defaults_auto_applied_when_models_is_none(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(ens, "is_cld3_available", lambda: True)
 
     lid = RobustLID()
-    assert lid.weights == ens.default_weights()
-    assert lid.script_weights == ens.default_script_weights()
-    assert lid.lang_weights == ens.default_lang_weights()
+    assert lid.weights == ens.default_weights(fast_mode=True)
+    assert lid.script_weights == ens.default_script_weights(fast_mode=True)
+    assert lid.lang_weights == ens.default_lang_weights(fast_mode=True)
 
 
 @pytest.mark.unit
@@ -360,9 +364,11 @@ def test_default_factories_tracks_cld3_availability(
     from robust_lid import ensemble as ens
 
     monkeypatch.setattr(ens, "is_cld3_available", lambda: True)
-    assert len(ens._default_factories()) == 7
+    assert len(ens._default_factories()) == 7  # fast_mode=False default for inspection
+    assert len(ens._default_factories(fast_mode=True)) == 5
     monkeypatch.setattr(ens, "is_cld3_available", lambda: False)
     assert len(ens._default_factories()) == 6
+    assert len(ens._default_factories(fast_mode=True)) == 4
 
 
 @pytest.mark.unit
@@ -379,7 +385,7 @@ def test_low_memory_uses_factories_and_releases(monkeypatch: pytest.MonkeyPatch)
         return _f
 
     factories = [make_factory(n) for n in ("eng", "kor", "jpn")]
-    monkeypatch.setattr(ens, "_default_factories", lambda: factories)
+    monkeypatch.setattr(ens, "_default_factories", lambda _fm=False: factories)
 
     lid = RobustLID(
         low_memory=True,
@@ -414,10 +420,72 @@ def test_low_memory_disables_script_gating(monkeypatch: pytest.MonkeyPatch) -> N
         supported_scripts = frozenset({"Latn"})  # claims no Hani support
 
     factories = [lambda: _LimitedFake([("eng", 0.99)])]
-    monkeypatch.setattr(ens, "_default_factories", lambda: factories)
+    monkeypatch.setattr(ens, "_default_factories", lambda _fm=False: factories)
     lid = RobustLID(low_memory=True, weights=[1.0], script_weights=[{}], lang_weights=[{}])
     code, _ = lid.predict("你好")  # Hani script → would be gated in fast mode
     assert code.startswith("eng_")  # vote kept → gating disabled
+
+
+@pytest.mark.unit
+def test_fast_mode_is_default_true() -> None:
+    """RobustLID() without args must enable fast_mode (the whole point)."""
+    lid = RobustLID(models=[FakeLID([])])
+    assert lid.fast_mode is True
+
+
+@pytest.mark.unit
+def test_fast_mode_default_true_drops_slow_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default RobustLID() drops langid + langdetect in fast_mode."""
+    from robust_lid import ensemble as ens
+
+    order = ens.default_backend_order()  # fast_mode=False (all)
+    fast_order = ens.default_backend_order(fast_mode=True)
+    assert "langid" in order and "langdetect" in order
+    assert "langid" not in fast_order and "langdetect" not in fast_order
+    assert len(order) - len(fast_order) == 2
+
+
+@pytest.mark.unit
+def test_fast_mode_false_restores_all_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    from robust_lid import ensemble as ens
+
+    for name in [
+        "LangidLID",
+        "LangdetectLID",
+        "CLD2LID",
+        "CLD3LID",
+        "FastText176LID",
+        "FastText218eLID",
+        "GlotLID",
+    ]:
+        monkeypatch.setattr(ens, name, lambda *_a, **_kw: FakeLID([]))
+    monkeypatch.setattr(ens, "is_cld3_available", lambda: True)
+
+    all_backends = RobustLID(fast_mode=False)
+    assert len(all_backends.models) == 7
+    assert all_backends.fast_mode is False
+
+
+@pytest.mark.unit
+def test_slow_backend_names_constant_identifies_pure_python_backends() -> None:
+    from robust_lid import ensemble as ens
+
+    assert frozenset({"langid", "langdetect"}) == ens.SLOW_BACKEND_NAMES
+
+
+@pytest.mark.unit
+def test_default_weights_lengths_follow_fast_mode() -> None:
+    from robust_lid import ensemble as ens
+
+    full = ens.default_weights()
+    fast = ens.default_weights(fast_mode=True)
+    assert len(full) - len(fast) == 2  # dropped 2 slow backends
+
+    # Every fast-mode entry must correspond to a backend whose name is NOT slow
+    order = ens.default_backend_order(fast_mode=True)
+    assert set(order).isdisjoint(ens.SLOW_BACKEND_NAMES)
 
 
 @pytest.mark.unit

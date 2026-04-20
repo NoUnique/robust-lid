@@ -120,6 +120,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable thread-pool parallel execution of backends (default: on).",
     )
     parser.add_argument(
+        "--with-slow",
+        action="store_true",
+        help=(
+            "Include the pure-Python backends (langid, langdetect) that are "
+            "excluded by default under fast_mode. Adds ~8 ms/text but improves "
+            "ensemble diversity."
+        ),
+    )
+    parser.add_argument(
         "--list-backends",
         action="store_true",
         help="Print backend inventory (supported languages / scripts) and exit.",
@@ -162,9 +171,10 @@ def _iter_inputs(args: argparse.Namespace) -> Iterator[str]:
 
 
 def _build_engine(args: argparse.Namespace) -> RobustLID:
-    """Construct the engine honoring --models, --uniform, --low-memory, --no-parallel."""
+    """Construct the engine honoring all the CLI flags."""
     parallel = not args.no_parallel
     low_memory = args.low_memory
+    fast_mode = not args.with_slow
 
     if args.models:
         if low_memory:
@@ -195,16 +205,17 @@ def _build_engine(args: argparse.Namespace) -> RobustLID:
         )
 
     if args.uniform:
-        n = len(default_backend_order())
+        n = len(default_backend_order(fast_mode))
         return RobustLID(
             weights=[1.0] * n,
             script_weights=[{}] * n,
             lang_weights=[{}] * n,
             parallel=parallel,
             low_memory=low_memory,
+            fast_mode=fast_mode,
         )
 
-    return RobustLID(parallel=parallel, low_memory=low_memory)
+    return RobustLID(parallel=parallel, low_memory=low_memory, fast_mode=fast_mode)
 
 
 def _print_backend_inventory(out: TextIO | None = None) -> None:
