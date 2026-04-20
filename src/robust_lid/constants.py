@@ -1,20 +1,24 @@
-import os
 from pathlib import Path
+from typing import Final
 
-# Package Root
-PACKAGE_ROOT = Path(__file__).parent
-RESOURCES_DIR = PACKAGE_ROOT / "resources"
-CACHE_DIR = Path.home() / ".cache" / "robust_lid"
+PACKAGE_ROOT: Final[Path] = Path(__file__).parent
+RESOURCES_DIR: Final[Path] = PACKAGE_ROOT / "resources"
+CACHE_DIR: Final[Path] = Path.home() / ".cache" / "robust_lid"
 
-# Model URLs
-FASTTEXT_176_URL = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
-FASTTEXT_218E_URL = "https://huggingface.co/facebook/fasttext-language-identification/resolve/main/model.bin"
-GLOTLID_V3_URL = "https://huggingface.co/cis-lmu/glotlid/resolve/main/model_v3.bin"
+FASTTEXT_176_URL: Final[str] = (
+    "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
+)
+FASTTEXT_218E_URL: Final[str] = (
+    "https://huggingface.co/facebook/fasttext-language-identification/resolve/main/model.bin"
+)
+GLOTLID_V3_URL: Final[str] = "https://huggingface.co/cis-lmu/glotlid/resolve/main/model_v3.bin"
 
-# Model Filenames
-FASTTEXT_176_FILENAME = "lid.176.bin"
-FASTTEXT_218E_FILENAME = "lid.218e.bin"
-GLOTLID_V3_FILENAME = "glotlid_v3.bin"
+FASTTEXT_176_FILENAME: Final[str] = "lid.176.bin"
+FASTTEXT_218E_FILENAME: Final[str] = "lid.218e.bin"
+GLOTLID_V3_FILENAME: Final[str] = "glotlid_v3.bin"
 
-# Resource Files
-GLOTSCRIPT_TSV = RESOURCES_DIR / "GlotScript.tsv"
+GLOTSCRIPT_TSV: Final[Path] = RESOURCES_DIR / "GlotScript.tsv"
+
+UNDEFINED_LANG: Final[str] = "und"
+UNDEFINED_SCRIPT: Final[str] = "Zyyy"
+DOWNLOAD_TIMEOUT_SEC: Final[int] = 30

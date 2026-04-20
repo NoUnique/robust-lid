@@ -14,8 +14,87 @@ dependencies = [
     "requests>=2.31.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "pre-commit>=3.0",
+    "types-requests>=2.31.0",
+]
+cld3 = [
+    "gcld3>=3.0.13",  # requires system protoc; see README
+]
+e2e = [
+    "datasets>=2.14.0",
+    "gcld3>=3.0.13",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "--cov=src/robust_lid",
+    "--cov-report=term-missing",
+]
+markers = [
+    "unit: pure unit tests with no I/O",
+    "integration: end-to-end tests",
+    "network: requires network access (skipped by default)",
+    "slow: slow tests (skipped by default)",
+]
 
+[tool.coverage.run]
+source = ["src/robust_lid"]
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "fasttext",
+    "langid",
+    "langid.*",
+    "langdetect",
+    "langdetect.*",
+    "pycld2",
+    "gcld3",
+    "pycountry",
+]
+ignore_missing_imports = true

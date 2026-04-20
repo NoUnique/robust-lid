@@ -1,142 +1,196 @@
 import csv
-import re
-from typing import Dict, Optional, Tuple
+import logging
+from pathlib import Path
+
 import pycountry
-from .constants import GLOTSCRIPT_TSV
+
+from .constants import GLOTSCRIPT_TSV, UNDEFINED_LANG, UNDEFINED_SCRIPT
+
+logger = logging.getLogger(__name__)
+
+# Deprecated ISO 639-1 aliases that older LID backends still emit.
+# Map them to the modern code before any pycountry lookup.
+_ISO639_1_ALIASES: dict[str, str] = {
+    "iw": "he",  # Hebrew (old code)
+    "in": "id",  # Indonesian (old code)
+    "ji": "yi",  # Yiddish (old code)
+    "jw": "jv",  # Javanese (old code)
+}
+
+# Script equivalence classes. `detect_script` returns coarse codes (Hani, Hang)
+# while GlotScript records the precise primary (Hans, Kore). Treating these as
+# a single "does this backend cover script X" check requires unifying them.
+_SCRIPT_EQUIV_CLASSES: tuple[frozenset[str], ...] = (
+    frozenset({"Hani", "Hans", "Hant", "Hanb"}),
+    frozenset({"Kore", "Hang"}),
+)
+
+
+def _expand_script(code: str) -> set[str]:
+    """Return the equivalence class (singleton for unpaired codes)."""
+    for cls in _SCRIPT_EQUIV_CLASSES:
+        if code in cls:
+            return set(cls)
+    return {code}
+
 
 class ISOConverter:
-    def __init__(self):
-        self.mapping = self._load_mapping()
-        self.iso639_3_map = self._load_pycountry_map()
+    mapping: dict[str, str]
+    iso639_3_map: dict[str, str]
+    lang_to_scripts: dict[str, frozenset[str]]
 
-    def _load_mapping(self) -> Dict[str, str]:
-        """Loads GlotScript.tsv for mapping various codes to ISO 639-3."""
-        mapping = {}
-        if not GLOTSCRIPT_TSV.exists():
-            # Fallback or warning if file missing, though it should be there
-            return mapping
-        
-        with open(GLOTSCRIPT_TSV, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f, delimiter='\t')
+    def __init__(
+        self,
+        mapping: dict[str, str] | None = None,
+        iso639_3_map: dict[str, str] | None = None,
+        lang_to_scripts: dict[str, frozenset[str]] | None = None,
+        tsv_path: Path | None = None,
+    ) -> None:
+        loaded_mapping: dict[str, str] = {}
+        loaded_l2s: dict[str, frozenset[str]] = {}
+        if mapping is None or lang_to_scripts is None:
+            loaded_mapping, loaded_l2s = self._load_from_tsv(tsv_path or GLOTSCRIPT_TSV)
+        self.mapping = mapping if mapping is not None else loaded_mapping
+        self.lang_to_scripts = lang_to_scripts if lang_to_scripts is not None else loaded_l2s
+        self.iso639_3_map = iso639_3_map if iso639_3_map is not None else self._load_pycountry_map()
+
+    @staticmethod
+    def _load_from_tsv(
+        tsv_path: Path,
+    ) -> tuple[dict[str, str], dict[str, frozenset[str]]]:
+        mapping: dict[str, str] = {}
+        lang_to_scripts: dict[str, frozenset[str]] = {}
+        if not tsv_path.exists():
+            logger.warning(
+                "GlotScript TSV not found at %s; ISO639-3 validation will be limited", tsv_path
+            )
+            return mapping, lang_to_scripts
+        with open(tsv_path, encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter="\t")
             for row in reader:
-                iso639_3 = row['ISO639-3']
-                # Map ISO 639-3 to itself
+                iso639_3 = row["ISO639-3"]
                 mapping[iso639_3] = iso639_3
-                
-                # You might want to map other columns if they exist and are useful
-                # For now, we primarily need to ensure we can validate or lookup 
-                # based on what models return.
-                # Many models return 2-letter codes (ISO 639-1).
-                
-        return mapping
+                # GlotScript's `ISO15924-Main` is a comma-separated list of
+                # every ISO 15924 code the language is written in. The order
+                # is alphabetical, not by prevalence, so we keep them all and
+                # let the caller decide which ones matter.
+                raw = (row.get("ISO15924-Main") or "").strip()
+                if raw:
+                    scripts = frozenset(s.strip() for s in raw.split(",") if s.strip())
+                    if scripts:
+                        lang_to_scripts[iso639_3] = scripts
+        return mapping, lang_to_scripts
 
-    def _load_pycountry_map(self) -> Dict[str, str]:
-        """Creates a mapping from ISO 639-1 (2-letter) to ISO 639-3 (3-letter)."""
-        mapping = {}
+    @staticmethod
+    def _load_pycountry_map() -> dict[str, str]:
+        mapping: dict[str, str] = {}
         for language in pycountry.languages:
-            if hasattr(language, 'alpha_2') and hasattr(language, 'alpha_3'):
+            if hasattr(language, "alpha_2") and hasattr(language, "alpha_3"):
                 mapping[language.alpha_2] = language.alpha_3
         return mapping
 
-    def to_iso639_3(self, code: str) -> Optional[str]:
-        """Converts a language code to ISO 639-3."""
-        code = code.lower().replace('_', '-')
-        
-        # Handle some common cases or model specific outputs if needed
-        if '-' in code:
-            code = code.split('-')[0] # simplistic approach, refine if needed
+    def to_iso639_3(self, code: str) -> str | None:
+        code = code.lower().replace("_", "-")
+        if "-" in code:
+            code = code.split("-")[0]
+
+        # Canonicalise deprecated ISO 639-1 aliases (iw→he, in→id, …).
+        code = _ISO639_1_ALIASES.get(code, code)
 
         if len(code) == 3:
-            # Check if it's a valid 3-letter code (simple check via pycountry or our map)
             if pycountry.languages.get(alpha_3=code):
                 return code
-            # Also check our GlotScript map
             if code in self.mapping:
                 return code
-                
+
         if len(code) == 2:
             return self.iso639_3_map.get(code)
-            
+
         return None
 
-_converter = None
+    def scripts_for(self, code: str) -> frozenset[str]:
+        """Return every ISO 15924 script a language can be written in.
 
-def get_converter():
+        Accepts any code format to_iso639_3() handles (2-letter, 3-letter,
+        locale-subtagged). Empty set if the language is unknown or no
+        scripts are recorded in GlotScript.
+        """
+        iso3 = self.to_iso639_3(code)
+        if iso3 is None:
+            return frozenset()
+        return self.lang_to_scripts.get(iso3, frozenset())
+
+
+_converter: ISOConverter | None = None
+
+
+def get_converter() -> ISOConverter:
     global _converter
     if _converter is None:
         _converter = ISOConverter()
     return _converter
 
-def normalize_language_code(code: str) -> str:
-    """
-    Normalize language code to ISO 639-3.
-    Returns 'und' if unknown.
-    """
-    converter = get_converter()
+
+def set_converter(converter: ISOConverter | None) -> None:
+    """Override the global converter. Pass None to reset (useful in tests)."""
+    global _converter
+    _converter = converter
+
+
+def normalize_language_code(code: str, converter: ISOConverter | None = None) -> str:
+    """Normalize language code to ISO 639-3; returns UNDEFINED_LANG if unknown."""
+    if converter is None:
+        converter = get_converter()
     iso3 = converter.to_iso639_3(code)
-    return iso3 if iso3 else "und"
+    return iso3 if iso3 else UNDEFINED_LANG
+
+
+_SCRIPT_RANGES: dict[str, tuple[int, int]] = {
+    "Hang": (0xAC00, 0xD7A3),
+    "Hani": (0x4E00, 0x9FFF),
+    "Hira": (0x3040, 0x309F),
+    "Kana": (0x30A0, 0x30FF),
+    "Arab": (0x0600, 0x06FF),
+    "Cyrl": (0x0400, 0x04FF),
+    "Deva": (0x0900, 0x097F),  # Devanagari (Hindi, Marathi, Sanskrit, Nepali)
+    "Beng": (0x0980, 0x09FF),  # Bengali / Assamese
+    "Thai": (0x0E00, 0x0E7F),
+    "Grek": (0x0370, 0x03FF),
+    "Hebr": (0x0590, 0x05FF),
+}
+_LATIN_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0041, 0x005A),  # A-Z
+    (0x0061, 0x007A),  # a-z
+    (0x00C0, 0x024F),  # Latin-1 Supplement + Extended-A/B
+)
+
+
+def _classify_char(cp: int) -> str | None:
+    for start, end in _LATIN_RANGES:
+        if start <= cp <= end:
+            return "Latn"
+    for script, (start, end) in _SCRIPT_RANGES.items():
+        if start <= cp <= end:
+            return script
+    return None
+
 
 def detect_script(text: str) -> str:
+    """Detects the ISO 15924 script code of the text.
+
+    Returns UNDEFINED_SCRIPT (Zyyy) if no recognizable script is found.
+    Returns 'Jpan' when Han ideographs mix with Hiragana or Katakana.
     """
-    Detects the script of the text.
-    Returns ISO 15924 script code (e.g., 'Latn', 'Hang').
-    Defaults to 'Zyyy' (Common) or 'Zxxx' (Unwritten) if unknown.
-    """
-    # Simple implementation using regex ranges or a library if available.
-    # Since we don't have 'whichscript' installed as a dependency in the plan (it wasn't in the list),
-    # we can implement a basic one or use a heuristic.
-    # However, the user mentioned 'whichscript' in the prompt. 
-    # Let's check if we can use the logic provided in _temp/lid_functions.py which had a custom implementation.
-    
-    # For now, let's implement a basic heuristic based on unicode ranges for common scripts
-    # or rely on what was in _temp/lid_functions.py if we want to copy that logic.
-    # The user provided code in _temp/lid_functions.py:101 lid_iso15924
-    # It imports `whichscript.iso15924`. 
-    # Since `whichscript` is not in my dependency list, I should probably implement a simplified version 
-    # or ask to add it. But I'll try to implement a basic one here.
-    
-    # Actually, let's look at the user request again. 
-    # "langid, langdetect, cld2, cld3, fasttext176, fasttext215e, glotlidv3, whichscript로 디텍션하여"
-    # The user explicitly mentioned `whichscript`. I should probably have added it to dependencies.
-    # But since I didn't, I will use a placeholder or a simple implementation for now 
-    # and maybe add it later if needed. 
-    # Wait, `whichscript` might not be on PyPI or might be a local thing?
-    # The user provided `_temp/lid_functions.py` which imports `whichscript.iso15924`.
-    # I will assume for this step I can implement a basic one or I should have added it.
-    # Let's implement a basic one for now to unblock.
-    
-    # Basic script detection
-    scripts = {
-        'Hang': (0xAC00, 0xD7A3), # Hangul Syllables
-        'Latn': (0x0041, 0x007A), # Basic Latin (very rough, should be expanded but sufficient for now)
-        'Hani': (0x4E00, 0x9FFF), # CJK Unified Ideographs
-        'Hira': (0x3040, 0x309F), # Hiragana
-        'Kana': (0x30A0, 0x30FF), # Katakana
-        'Arab': (0x0600, 0x06FF), # Arabic
-        'Cyrl': (0x0400, 0x04FF), # Cyrillic
-    }
-    
-    counts = {k: 0 for k in scripts}
-    total = 0
+    counts: dict[str, int] = {}
     for char in text:
-        cp = ord(char)
-        # Check ranges
-        for script, (start, end) in scripts.items():
-            if start <= cp <= end:
-                counts[script] += 1
-                total += 1
-                break
-        # Also check Latin extended if needed, but keeping it simple
-    
-    if total == 0:
-        return "Zyyy"
+        script = _classify_char(ord(char))
+        if script is not None:
+            counts[script] = counts.get(script, 0) + 1
 
-    # Special handling for Japanese (Jpan = Hani + Hira + Kana)
-    if counts['Hani'] > 0 and (counts['Hira'] > 0 or counts['Kana'] > 0):
+    if not counts:
+        return UNDEFINED_SCRIPT
+
+    if counts.get("Hani", 0) > 0 and (counts.get("Hira", 0) > 0 or counts.get("Kana", 0) > 0):
         return "Jpan"
-    
-    # Special handling for Korean (Kore = Hang + Hani)? Usually just Hang is fine for modern Korean.
-    
-    most_common = max(counts, key=counts.get)
-    return most_common
 
+    return max(counts, key=lambda k: counts[k])

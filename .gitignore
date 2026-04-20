@@ -8,3 +8,16 @@ build/
 .DS_Store
 _temp/
 test_lid.py
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets — never commit. Share schema via `.env.example`.
+.env
+.env.*
+!.env.example
