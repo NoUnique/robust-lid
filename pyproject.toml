@@ -161,7 +161,10 @@ version_toml = ["pyproject.toml:project.version"]
 branch = "main"
 tag_format = "v{version}"
 commit_message = "chore(release): v{version} [skip ci]"
-build_command = "uv build"
+# Run inside the python-semantic-release Docker container, which has
+# `python` + `pip` but NOT `uv`. `python -m build` is the PyPA-standard
+# builder and produces the same sdist + wheel pair under `dist/`.
+build_command = "python -m pip install --quiet build && python -m build"
 changelog_file = "CHANGELOG.md"
 upload_to_vcs_release = true
 # Stay on 0.x until API stabilises: disallow promotion to 1.0 on breaking
