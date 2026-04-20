@@ -1,4 +1,7 @@
+import gc
 from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from .constants import UNDEFINED_LANG, UNDEFINED_SCRIPT
 from .models import (
@@ -146,6 +149,17 @@ def _default_models() -> list[LID]:
     return items
 
 
+def _default_factories() -> list[Callable[[], LID]]:
+    """Zero-argument backend constructors, in the same order as ``default_backend_order()``.
+    Used by low-memory mode: each predict call instantiates backends one at a time
+    and releases them afterwards, so peak RAM ≈ size of the largest single model."""
+    items: list[Callable[[], LID]] = [LangidLID, LangdetectLID, CLD2LID]
+    if is_cld3_available():
+        items.append(CLD3LID)
+    items.extend([FastText176LID, FastText218eLID, GlotLID])
+    return items
+
+
 # ---------------------------------------------------------------------------
 # RobustLID
 # ---------------------------------------------------------------------------
@@ -156,6 +170,8 @@ class RobustLID:
     weights: list[float] | None
     script_weights: list[dict[str, float]] | None
     lang_weights: list[dict[str, float]] | None
+    parallel: bool
+    low_memory: bool
 
     def __init__(
         self,
@@ -163,27 +179,46 @@ class RobustLID:
         weights: list[float] | None = None,
         script_weights: list[dict[str, float]] | None = None,
         lang_weights: list[dict[str, float]] | None = None,
+        parallel: bool = True,
+        low_memory: bool = False,
     ) -> None:
         """Build a weighted LID ensemble.
 
-        When ``models`` is None, the default 6/7-backend ensemble is built and,
-        for any of the three weight parameters that are also None, tuned
-        defaults are applied (see ``default_weights``,
-        ``default_script_weights``, ``default_lang_weights``).
+        Execution modes
+        ---------------
+        * Default (``parallel=True``, ``low_memory=False``) — eager-load every
+          backend at construction time, run per-text predict calls concurrently
+          on a thread pool. Fastest; peak RAM ≈ sum of all loaded models
+          (~2 GB with the default 7 backends).
+        * ``low_memory=True`` — do NOT eager-load; each ``predict`` instantiates
+          one backend at a time, collects its vote, and drops the reference
+          before moving on. Peak RAM ≈ size of the largest single model
+          (~1.2 GB). Much slower per call (each predict re-loads fastText
+          models from disk). Incompatible with a custom ``models=`` list and
+          bypasses script gating (which requires live model instances).
+        * ``parallel=False`` — sequential predict calls in a plain Python loop.
 
-        When ``models`` is provided, unspecified weight parameters stay None
-        (uniform 1.0) — defaults are tuned for the specific backend names and
-        cannot be applied to custom ensembles.
-
-        Effective weight for model *i* with top prediction ``lang`` on text of
-        script ``script`` is::
-
-            weights[i]
-              * script_weights[i].get(script, 1.0)
-              * lang_weights[i].get(lang, 1.0)
+        When ``models`` is None the default 6/7-backend ensemble is built and
+        tuned defaults for the three weight parameters are applied.
         """
+        if low_memory and models is not None:
+            raise ValueError(
+                "low_memory=True requires the default factory ensemble; "
+                "pass models=None or drop low_memory."
+            )
+
+        self.parallel = parallel
+        self.low_memory = low_memory
         using_default_models = models is None
-        self.models = models if models is not None else _default_models()
+
+        if low_memory:
+            self._factories: list[Callable[[], LID]] | None = _default_factories()
+            self.models = []
+            effective_n = len(self._factories)
+        else:
+            self._factories = None
+            self.models = models if models is not None else _default_models()
+            effective_n = len(self.models)
 
         if using_default_models:
             if weights is None:
@@ -193,14 +228,15 @@ class RobustLID:
             if lang_weights is None:
                 lang_weights = default_lang_weights()
 
-        n = len(self.models)
         for name, value in (
             ("weights", weights),
             ("script_weights", script_weights),
             ("lang_weights", lang_weights),
         ):
-            if value is not None and len(value) != n:
-                raise ValueError(f"{name} length {len(value)} does not match models length {n}")
+            if value is not None and len(value) != effective_n:
+                raise ValueError(
+                    f"{name} length {len(value)} does not match backend count {effective_n}"
+                )
 
         self.weights = weights
         self.script_weights = script_weights
@@ -214,12 +250,13 @@ class RobustLID:
             w = self.weights[i] if self.weights is not None else 1.0
 
             # Auto-gate: if the backend declared a non-empty supported-scripts
-            # set and the input's script isn't in it, the backend cannot
-            # meaningfully predict — zero its vote so it can't poison the
-            # ensemble with a confidently-wrong guess.
-            supported = self.models[i].supported_scripts
-            if supported and script != UNDEFINED_SCRIPT and script not in supported:
-                w = 0.0
+            # set and the input's script isn't in it, zero its vote so it can't
+            # poison the ensemble with a confidently-wrong guess. Only runs
+            # when we have a live model instance (not in low_memory mode).
+            if self.models:
+                supported = self.models[i].supported_scripts
+                if supported and script != UNDEFINED_SCRIPT and script not in supported:
+                    w = 0.0
 
             if self.script_weights is not None:
                 w *= self.script_weights[i].get(script, 1.0)
@@ -229,13 +266,42 @@ class RobustLID:
             effective.append(w)
         return effective
 
+    def _collect_predictions(self, text: str) -> list[list[tuple[str, float]]]:
+        if self.low_memory:
+            return self._predict_streaming(text)
+        if self.parallel and len(self.models) > 1:
+            return self._predict_parallel(text)
+        return [m.predict(text) for m in self.models]
+
+    def _predict_parallel(self, text: str) -> list[list[tuple[str, float]]]:
+        """Run each backend on its own thread. fastText / pycld2 / gcld3 are
+        C extensions that release the GIL, so real parallelism happens for
+        the slow ones. Pool is created per call — small overhead vs predict
+        latency on the heavy backends."""
+        with ThreadPoolExecutor(max_workers=len(self.models)) as ex:
+            return list(ex.map(lambda m: m.predict(text), self.models))
+
+    def _predict_streaming(self, text: str) -> list[list[tuple[str, float]]]:
+        """Load→predict→unload per backend. Peak RAM tracks the largest
+        single model, at the cost of per-call disk I/O."""
+        assert self._factories is not None
+        results: list[list[tuple[str, float]]] = []
+        for factory in self._factories:
+            model = factory()
+            try:
+                results.append(model.predict(text))
+            finally:
+                del model
+                gc.collect()
+        return results
+
     def predict(self, text: str) -> tuple[str, float]:
         """Predicts the language and script of the text using ensemble voting.
 
         Returns (language_script_code, confidence). Example: ('eng_Latn', 0.9).
         Returns ('und_Zyyy', 0.0) if no model produces a usable prediction.
         """
-        predictions = [model.predict(text) for model in self.models]
+        predictions = self._collect_predictions(text)
         script = detect_script(text)
         effective = self._effective_weights(predictions, script)
         best_lang, confidence = compute_ensemble_vote(predictions, effective)

@@ -30,11 +30,28 @@ echo "안녕하세요" | rlid --json
 rlid --file input.txt --no-text          # one pred per input line, no echo
 rlid --models ft176,glotlid "Hello"      # use a subset of backends
 rlid --uniform "Hello"                   # disable tuned defaults
+rlid --low-memory "Hello"                # load one backend at a time (peak ~1.9 GB)
+rlid --no-parallel "Hello"               # sequential predict (default is threaded)
+rlid --verbose "Hello"                   # stage-by-stage progress on stderr
 rlid --list-backends                     # inventory and exit
 rlid --help
 ```
 
 First call downloads ~1.5 GB of fastText models to `~/.cache/robust_lid/`.
+
+### Execution modes and memory footprint
+
+| Mode | How | Peak RSS | Per-call latency |
+|---|---|---|---|
+| Fast (default) | All backends eagerly loaded, predict calls run on a thread pool | **~3.2 GB** | ~30-100 ms |
+| Sequential | `parallel=False` / `--no-parallel` — no thread pool | ~3.2 GB | ~100-300 ms |
+| Low memory | `low_memory=True` / `--low-memory` — each predict re-instantiates every backend, releases when done | **~1.9 GB peak, ~250 MB between calls** | seconds (re-loads fastText from disk each call) |
+
+Low-memory mode trades per-call latency for a much smaller resident footprint
+(useful on CI runners, small VPSes, or embedded-like environments). It
+disables supported-script gating — backends aren't live between calls, so
+their `supported_scripts` attribute can't be inspected. Incompatible with a
+custom `models=` list.
 
 ## Backends
 

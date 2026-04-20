@@ -223,7 +223,8 @@ def test_default_path_uses_robustlid_no_args(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(cli, "RobustLID", _Recorder)
     cli.main(["Hello"])  # no --models, no --uniform
     assert captured["called"] is True
-    assert captured["kwargs"] == {}  # RobustLID() with no args → defaults auto-applied
+    # Default path passes execution-mode kwargs but no weight overrides
+    assert captured["kwargs"] == {"parallel": True, "low_memory": False}
 
 
 @pytest.mark.unit
@@ -273,6 +274,48 @@ def test_verbose_prints_stage_messages_to_stderr(
     assert "[rlid] building ensemble" in captured.err
     assert "[rlid] predicting" in captured.err
     assert "[rlid] done" in captured.err
+
+
+@pytest.mark.unit
+def test_low_memory_flag_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def predict(self, _t: str) -> tuple[str, float]:
+            return ("eng_Latn", 1.0)
+
+    monkeypatch.setattr(cli, "RobustLID", _Recorder)
+    cli.main(["--low-memory", "Hello"])
+    assert captured.get("low_memory") is True
+    assert captured.get("parallel") is True  # default
+
+
+@pytest.mark.unit
+def test_no_parallel_flag_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def predict(self, _t: str) -> tuple[str, float]:
+            return ("eng_Latn", 1.0)
+
+    monkeypatch.setattr(cli, "RobustLID", _Recorder)
+    cli.main(["--no-parallel", "Hello"])
+    assert captured.get("parallel") is False
+    assert captured.get("low_memory") is False
+
+
+@pytest.mark.unit
+def test_low_memory_with_models_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_BACKEND_FACTORIES", {"langid": lambda: FakeLID([])})
+    monkeypatch.setattr(cli, "RobustLID", lambda **_: None)
+    with pytest.raises(SystemExit, match="incompatible"):
+        cli.main(["--low-memory", "--models", "langid", "Hello"])
 
 
 @pytest.mark.unit

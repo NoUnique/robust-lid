@@ -322,6 +322,105 @@ def test_default_lang_weights_downweight_langid_ltz_and_kir() -> None:
 
 
 @pytest.mark.unit
+def test_parallel_default_produces_same_result_as_sequential() -> None:
+    models = [FakeLID([("eng", 0.9)]), FakeLID([("eng", 0.7)]), FakeLID([("fra", 0.5)])]
+    r_par = RobustLID(models=list(models), parallel=True)
+    r_seq = RobustLID(models=list(models), parallel=False)
+    assert r_par.predict("Hello world") == r_seq.predict("Hello world")
+
+
+@pytest.mark.unit
+def test_parallel_single_model_falls_back_to_sequential() -> None:
+    """With one backend the thread-pool path is skipped (pointless overhead)."""
+    r = RobustLID(models=[FakeLID([("eng", 1.0)])], parallel=True)
+    assert r.predict("Hello")[0] == "eng_Latn"
+
+
+@pytest.mark.unit
+def test_parallel_each_backend_is_called_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [FakeLID([("eng", 1.0)]) for _ in range(4)]
+    ensemble = RobustLID(models=list(fakes), parallel=True)
+    ensemble.predict("hi")
+    for fake in fakes:
+        assert fake.calls == ["hi"]
+
+
+@pytest.mark.unit
+def test_low_memory_requires_default_models() -> None:
+    with pytest.raises(ValueError, match="low_memory=True"):
+        RobustLID(models=[FakeLID([])], low_memory=True)
+
+
+@pytest.mark.unit
+def test_default_factories_tracks_cld3_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from robust_lid import ensemble as ens
+
+    monkeypatch.setattr(ens, "is_cld3_available", lambda: True)
+    assert len(ens._default_factories()) == 7
+    monkeypatch.setattr(ens, "is_cld3_available", lambda: False)
+    assert len(ens._default_factories()) == 6
+
+
+@pytest.mark.unit
+def test_low_memory_uses_factories_and_releases(monkeypatch: pytest.MonkeyPatch) -> None:
+    from robust_lid import ensemble as ens
+
+    calls: list[str] = []
+
+    def make_factory(name: str) -> object:
+        def _f() -> FakeLID:
+            calls.append(f"construct:{name}")
+            return FakeLID([(name[:3], 0.9)])
+
+        return _f
+
+    factories = [make_factory(n) for n in ("eng", "kor", "jpn")]
+    monkeypatch.setattr(ens, "_default_factories", lambda: factories)
+
+    lid = RobustLID(
+        low_memory=True,
+        # Shrink defaults to 3 entries to match our fake factory count
+        weights=[1.0, 1.0, 1.0],
+        script_weights=[{}, {}, {}],
+        lang_weights=[{}, {}, {}],
+    )
+    lid.predict("Hello")
+    # Each factory invoked exactly once per predict call.
+    assert calls == ["construct:eng", "construct:kor", "construct:jpn"]
+
+    # Second call reinstantiates — we never keep live references.
+    lid.predict("Hello again")
+    assert calls == [
+        "construct:eng",
+        "construct:kor",
+        "construct:jpn",
+        "construct:eng",
+        "construct:kor",
+        "construct:jpn",
+    ]
+
+
+@pytest.mark.unit
+def test_low_memory_disables_script_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In low-memory mode we don't hold live model instances, so the supported-scripts
+    gate is skipped. A backend whose predict disagrees with the script still votes."""
+    from robust_lid import ensemble as ens
+
+    class _LimitedFake(FakeLID):
+        supported_scripts = frozenset({"Latn"})  # claims no Hani support
+
+    factories = [lambda: _LimitedFake([("eng", 0.99)])]
+    monkeypatch.setattr(ens, "_default_factories", lambda: factories)
+    lid = RobustLID(low_memory=True, weights=[1.0], script_weights=[{}], lang_weights=[{}])
+    code, _ = lid.predict("你好")  # Hani script → would be gated in fast mode
+    assert code.startswith("eng_")  # vote kept → gating disabled
+
+
+@pytest.mark.unit
 def test_script_weights_do_not_apply_to_other_scripts() -> None:
     """langdetect downweight on Hani must not affect a Latin-script prediction."""
     from robust_lid import ensemble as ens

@@ -105,6 +105,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable tuned defaults (scalar/script/lang weights all 1.0).",
     )
     parser.add_argument(
+        "--low-memory",
+        action="store_true",
+        help=(
+            "Load backends one at a time per predict (peak RAM ≈ largest single "
+            "model, ~1.2 GB) instead of keeping all ~2 GB resident. Much slower "
+            "per call and disables script gating."
+        ),
+    )
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable thread-pool parallel execution of backends (default: on).",
+    )
+    parser.add_argument(
         "--list-backends",
         action="store_true",
         help="Print backend inventory (supported languages / scripts) and exit.",
@@ -147,8 +161,16 @@ def _iter_inputs(args: argparse.Namespace) -> Iterator[str]:
 
 
 def _build_engine(args: argparse.Namespace) -> RobustLID:
-    """Construct the engine honoring --models and --uniform."""
+    """Construct the engine honoring --models, --uniform, --low-memory, --no-parallel."""
+    parallel = not args.no_parallel
+    low_memory = args.low_memory
+
     if args.models:
+        if low_memory:
+            raise SystemExit(
+                "rlid: --low-memory is incompatible with --models (it's wired to the "
+                "default factory ensemble)."
+            )
         names = [n.strip() for n in args.models.split(",") if n.strip()]
         unknown = [n for n in names if n not in _BACKEND_FACTORIES]
         if unknown:
@@ -162,12 +184,13 @@ def _build_engine(args: argparse.Namespace) -> RobustLID:
             )
         models: list[LID] = [_BACKEND_FACTORIES[n]() for n in names]
         if args.uniform:
-            return RobustLID(models=models)
+            return RobustLID(models=models, parallel=parallel)
         return RobustLID(
             models=models,
             weights=[DEFAULT_WEIGHTS_BY_NAME.get(n, 1.0) for n in names],
             script_weights=[dict(DEFAULT_SCRIPT_WEIGHTS_BY_NAME.get(n, {})) for n in names],
             lang_weights=[dict(DEFAULT_LANG_WEIGHTS_BY_NAME.get(n, {})) for n in names],
+            parallel=parallel,
         )
 
     if args.uniform:
@@ -176,9 +199,11 @@ def _build_engine(args: argparse.Namespace) -> RobustLID:
             weights=[1.0] * n,
             script_weights=[{}] * n,
             lang_weights=[{}] * n,
+            parallel=parallel,
+            low_memory=low_memory,
         )
 
-    return RobustLID()
+    return RobustLID(parallel=parallel, low_memory=low_memory)
 
 
 def _print_backend_inventory(out: TextIO | None = None) -> None:
