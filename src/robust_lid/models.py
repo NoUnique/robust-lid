@@ -268,6 +268,15 @@ class LID(ABC):
         """
         ...
 
+    def predict_batch(self, texts: list[str]) -> list[list[tuple[str, float]]]:
+        """Predict many texts at once.
+
+        Default implementation is a per-text loop over ``predict``. Backends
+        with native batch APIs (fastText's ``multilinePredict``) override this
+        to amortize C-level overhead and avoid redundant Python work.
+        """
+        return [self.predict(t) for t in texts]
+
     @cached_property
     def supported_langs(self) -> frozenset[str]:
         """ISO 639-3 codes this backend can ever emit.
@@ -446,6 +455,32 @@ class FastTextLID(LID):
         except Exception:
             logger.debug("FastTextLID.predict failed", exc_info=True)
             return []
+
+    def predict_batch(self, texts: list[str]) -> list[list[tuple[str, float]]]:
+        """Route through fasttext's native `multilinePredict` C++ path and
+        cache label→normalized code lookups so we pay the ISOConverter cost
+        once per distinct label across the batch, not k × N times."""
+        if not texts:
+            return []
+        try:
+            cleaned = [t.replace("\n", " ") for t in texts]
+            labels_batch, scores_batch = self.model.predict(cleaned, k=5)
+            norm_cache: dict[str, str] = {}
+            results: list[list[tuple[str, float]]] = []
+            for labels, scores in zip(labels_batch, scores_batch, strict=True):
+                per_text: list[tuple[str, float]] = []
+                for label, score in zip(labels, scores, strict=False):
+                    code = label.replace("__label__", "")
+                    normalized = norm_cache.get(code)
+                    if normalized is None:
+                        normalized = normalize_language_code(code)
+                        norm_cache[code] = normalized
+                    per_text.append((normalized, float(score)))
+                results.append(per_text)
+            return results
+        except Exception:
+            logger.debug("FastTextLID.predict_batch failed", exc_info=True)
+            return [[] for _ in texts]
 
     @cached_property
     def supported_langs(self) -> frozenset[str]:

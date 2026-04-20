@@ -308,3 +308,50 @@ class RobustLID:
         if best_lang == UNDEFINED_LANG:
             return f"{UNDEFINED_LANG}_{UNDEFINED_SCRIPT}", 0.0
         return f"{best_lang}_{script}", confidence
+
+    def predict_batch(self, texts: list[str]) -> list[tuple[str, float]]:
+        """Batch-optimised predict.
+
+        For each backend, all N texts are processed in one call to its
+        ``predict_batch`` method — fastText goes through ``multilinePredict``
+        (C++) instead of N round-trips, and we build/reuse a single
+        ThreadPoolExecutor for the whole batch instead of one per text.
+
+        Returns a list of ``(language_script, confidence)`` tuples, one per
+        input text in order.
+        """
+        if not texts:
+            return []
+
+        preds_by_backend = self._collect_predictions_batch(texts)
+
+        results: list[tuple[str, float]] = []
+        for j, text in enumerate(texts):
+            per_text_preds = [preds_by_backend[i][j] for i in range(len(preds_by_backend))]
+            script = detect_script(text)
+            effective = self._effective_weights(per_text_preds, script)
+            best_lang, confidence = compute_ensemble_vote(per_text_preds, effective)
+            if best_lang == UNDEFINED_LANG:
+                results.append((f"{UNDEFINED_LANG}_{UNDEFINED_SCRIPT}", 0.0))
+            else:
+                results.append((f"{best_lang}_{script}", confidence))
+        return results
+
+    def _collect_predictions_batch(self, texts: list[str]) -> list[list[list[tuple[str, float]]]]:
+        """Returns predictions shaped as ``[backend_i][text_j]``."""
+        if self.low_memory:
+            assert self._factories is not None
+            results: list[list[list[tuple[str, float]]]] = []
+            for factory in self._factories:
+                model = factory()
+                try:
+                    results.append(model.predict_batch(texts))
+                finally:
+                    del model
+                    gc.collect()
+            return results
+        if self.parallel and len(self.models) > 1:
+            # One pool for the whole batch — reused across all texts.
+            with ThreadPoolExecutor(max_workers=len(self.models)) as ex:
+                return list(ex.map(lambda m: m.predict_batch(texts), self.models))
+        return [m.predict_batch(texts) for m in self.models]

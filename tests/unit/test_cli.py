@@ -34,6 +34,9 @@ class _FakeEngine:
         self.calls.append(text)
         return self._preds.get(text, self._default)
 
+    def predict_batch(self, texts: list[str]) -> list[tuple[str, float]]:
+        return [self.predict(t) for t in texts]
+
 
 @pytest.fixture
 def fake_engine(monkeypatch: pytest.MonkeyPatch) -> _FakeEngine:

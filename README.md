@@ -39,6 +39,44 @@ rlid --help
 
 First call downloads ~1.5 GB of fastText models to `~/.cache/robust_lid/`.
 
+### Batch prediction
+
+For multi-text workloads, call `predict_batch` instead of `predict` in a loop:
+
+```python
+from robust_lid import RobustLID
+
+lid = RobustLID()
+results = lid.predict_batch(["Hello world", "안녕하세요", "Bonjour"])
+# [('eng_Latn', 0.99), ('kor_Hang', 1.0), ('fra_Latn', 0.97)]
+```
+
+The CLI automatically switches to the batch path when more than one text is
+provided (via `--file` or stdin).
+
+**Where the speedup actually comes from**:
+
+1. **Single thread pool per batch** instead of one per text — eliminates the
+   7-worker pool-construction overhead × N repetitions.
+2. **Cached label normalization** in `FastTextLID.predict_batch` — the
+   ISOConverter lookup runs once per distinct fasttext label across the
+   batch, not k × N times.
+3. **fastText `multilinePredict` (C++)** — a single C entry per backend.
+   Measured benefit is small for already-fast models (lid.176: ~1× vs
+   sequential) but more meaningful for the heavier fasttext-218e / GlotLID
+   on large batches.
+
+**The unfixable bottleneck**: `langid` and `langdetect` are pure-Python Naive
+Bayes classifiers with no C extension and no batch API — they sit at roughly
+~5.9 ms/text and ~1.8 ms/text regardless of how we call them, because the
+GIL prevents real threading parallelism for their Python work. For
+throughput-critical use where ensemble diversity can be traded for speed,
+drop them explicitly:
+
+```bash
+rlid --models ft176,ft218e,glotlid,cld2,cld3 < input.txt
+```
+
 ### Execution modes and memory footprint
 
 | Mode | How | Peak RSS | Per-call latency |

@@ -65,7 +65,8 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "With no TEXT and no --file, reads one text per line from stdin. "
             "Output is '<lang>_<Script>\\t<confidence>\\t<text>' by default, "
-            "or JSON Lines with --json."
+            "or JSON Lines with --json. When more than one text is supplied, "
+            "the batch-optimised predict path is used automatically."
         ),
     )
     parser.add_argument(
@@ -256,17 +257,21 @@ def main(argv: list[str] | None = None) -> int:
     engine = _build_engine(args)
     _vprint(f"ensemble ready in {time.monotonic() - t0:.1f}s", args.verbose)
 
-    count = 0
-    _vprint("predicting", args.verbose)
+    texts = list(_iter_inputs(args))
+    _vprint(f"predicting {len(texts)} text(s)", args.verbose)
     t1 = time.monotonic()
-    for text in _iter_inputs(args):
-        lang, confidence = engine.predict(text)
-        count += 1
+    if len(texts) > 1:
+        # Batch path avoids per-text thread-pool setup and amortizes
+        # fastText's C++ entry cost via multilinePredict.
+        predictions = engine.predict_batch(texts)
+    else:
+        predictions = [engine.predict(t) for t in texts]
+    for text, (lang, confidence) in zip(texts, predictions, strict=True):
         if args.json:
             print(_format_json(text, lang, confidence))
         else:
             print(_format_plain(text, lang, confidence, show_text=not args.no_text))
-    _vprint(f"done — {count} text(s) in {time.monotonic() - t1:.2f}s", args.verbose)
+    _vprint(f"done — {len(texts)} text(s) in {time.monotonic() - t1:.2f}s", args.verbose)
     return 0
 
 
