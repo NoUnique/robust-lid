@@ -6,12 +6,32 @@ any single classifier is unreliable.
 
 ## Quick start
 
+### Python
+
 ```python
 from robust_lid import RobustLID
 
 lid = RobustLID()
 code, confidence = lid.predict("The quick brown fox jumps over the lazy dog.")
 # ('eng_Latn', 0.91)
+```
+
+### CLI
+
+Two entry points are registered: `rlid` (short) and `robust-lid` (long alias).
+
+```bash
+rlid "The quick brown fox jumps over the lazy dog."
+# eng_Latn    0.987    The quick brown fox jumps over the lazy dog.
+
+echo "안녕하세요" | rlid --json
+# {"text": "안녕하세요", "lang": "kor_Hang", "confidence": 0.94}
+
+rlid --file input.txt --no-text          # one pred per input line, no echo
+rlid --models ft176,glotlid "Hello"      # use a subset of backends
+rlid --uniform "Hello"                   # disable tuned defaults
+rlid --list-backends                     # inventory and exit
+rlid --help
 ```
 
 First call downloads ~1.5 GB of fastText models to `~/.cache/robust_lid/`.
